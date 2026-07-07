@@ -185,7 +185,7 @@ pub(crate) fn init_metrics() {
         "smg_router_forward_overhead_seconds",
         "Router-side forwarding overhead by router_type, endpoint: time from request entry \
          until just before the upstream send (worker selection incl. cache-aware tree lookup \
-         + request prep). Excludes upstream/engine wait. Sub-millisecond buckets."
+         + request prep). Excludes upstream/engine wait. Microsecond-scale buckets (10us..100ms)."
     );
     describe_counter!(
         "smg_router_request_errors_total",
