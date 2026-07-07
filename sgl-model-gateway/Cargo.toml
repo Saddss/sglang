@@ -2,6 +2,12 @@
 members = ["bindings/python"]
 exclude = ["bindings/golang", "examples"]
 
+# Fork patch: vendored openai-protocol with the 4-stop-sequence cap removed.
+# Callers send template stop sets larger than 4 and vLLM accepts them, so the
+# router must not reject them with a 400. See third_party/openai-protocol.
+[patch.crates-io]
+openai-protocol = { path = "third_party/openai-protocol" }
+
 [package]
 name = "sgl-model-gateway"
 version = "0.3.2"
