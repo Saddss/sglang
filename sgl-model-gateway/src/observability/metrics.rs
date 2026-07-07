@@ -181,6 +181,12 @@ pub(crate) fn init_metrics() {
         "smg_router_request_duration_seconds",
         "Router request duration by router_type, backend_type, connection_mode, model, endpoint"
     );
+    describe_histogram!(
+        "smg_router_forward_overhead_seconds",
+        "Router-side forwarding overhead by router_type, endpoint: time from request entry \
+         until just before the upstream send (worker selection incl. cache-aware tree lookup \
+         + request prep). Excludes upstream/engine wait. Sub-millisecond buckets."
+    );
     describe_counter!(
         "smg_router_request_errors_total",
         "Router errors by router_type, backend_type, connection_mode, model, endpoint, error_type"
@@ -373,6 +379,15 @@ pub fn start_prometheus(config: PrometheusConfig) {
         ]
     });
 
+    // Router forwarding overhead is sub-millisecond (tens of microseconds), so the
+    // coarse `duration_seconds` buckets (1ms floor) can't resolve it. Give it a
+    // dedicated microsecond-scale bucket set. Full-name match takes precedence.
+    let overhead_matcher = Matcher::Full(String::from("smg_router_forward_overhead_seconds"));
+    let overhead_bucket: Vec<f64> = vec![
+        0.000_01, 0.000_025, 0.000_05, 0.000_1, 0.000_25, 0.000_5, 0.001, 0.002_5, 0.005, 0.01,
+        0.025, 0.05, 0.1,
+    ];
+
     let ip_addr: IpAddr = config
         .host
         .parse()
@@ -384,6 +399,8 @@ pub fn start_prometheus(config: PrometheusConfig) {
         .upkeep_timeout(Duration::from_secs(5 * 60))
         .set_buckets_for_metric(duration_matcher, &duration_bucket)
         .expect("failed to set duration bucket")
+        .set_buckets_for_metric(overhead_matcher, &overhead_bucket)
+        .expect("failed to set forward-overhead bucket")
         .install()
         .expect("failed to install Prometheus metrics exporter");
 }
@@ -616,6 +633,22 @@ impl Metrics {
             "backend_type" => backend_type,
             "connection_mode" => connection_mode,
             "model" => model,
+            "endpoint" => endpoint
+        )
+        .record(duration.as_secs_f64());
+    }
+
+    /// Record router-side forwarding overhead (worker selection + request prep),
+    /// i.e. the time the router itself adds before handing the request to the
+    /// upstream. Excludes upstream/engine time. All labels are static.
+    pub fn record_router_forward_overhead(
+        router_type: &'static str,
+        endpoint: &'static str,
+        duration: Duration,
+    ) {
+        histogram!(
+            "smg_router_forward_overhead_seconds",
+            "router_type" => router_type,
             "endpoint" => endpoint
         )
         .record(duration.as_secs_f64());

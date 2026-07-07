@@ -285,6 +285,9 @@ impl Router {
         is_stream: bool,
         text: &str,
     ) -> Response {
+        // Router-side forwarding overhead: measure from here (worker selection +
+        // request prep) up to just before the upstream send. Excludes engine wait.
+        let dispatch_start = Instant::now();
         let worker = match self
             .select_worker_for_model(model_id, Some(text), headers)
             .await
@@ -312,6 +315,14 @@ impl Router {
         let mut headers_with_trace = headers.cloned().unwrap_or_default();
         inject_trace_context_http(&mut headers_with_trace);
         let headers = Some(&headers_with_trace);
+
+        // Everything above is router-attributable forwarding cost; stop the clock
+        // right before we hand off to the upstream.
+        Metrics::record_router_forward_overhead(
+            metrics_labels::ROUTER_HTTP,
+            route_to_endpoint(route),
+            dispatch_start.elapsed(),
+        );
 
         let response = self
             .send_typed_request(headers, typed_req, route, &worker, is_stream, load_guard)
