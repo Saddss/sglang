@@ -238,7 +238,8 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
 
-    /// Up to 4 sequences where the API will stop generating further tokens
+    /// Sequences where the API will stop generating further tokens
+    /// (fork: upstream's 4-sequence cap removed; forwarded as-is to the engine)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_stop"))]
     pub stop: Option<StringOrArray>,

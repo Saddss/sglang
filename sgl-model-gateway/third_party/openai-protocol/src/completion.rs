@@ -53,7 +53,8 @@ pub struct CompletionRequest {
     #[serde(default)]
     pub echo: bool,
 
-    /// Up to 4 sequences where the API will stop generating further tokens
+    /// Sequences where the API will stop generating further tokens
+    /// (fork: upstream's 4-sequence cap removed; forwarded as-is to the engine)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<StringOrArray>,
 
