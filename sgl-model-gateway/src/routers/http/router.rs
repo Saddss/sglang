@@ -188,6 +188,12 @@ impl Router {
             policy.name(),
         );
 
+        // Per-engine routed counter (per-worker QPS / load-balance spread)
+        Metrics::record_worker_routed(
+            available[idx].url(),
+            model_id.unwrap_or(UNKNOWN_MODEL_ID),
+        );
+
         Some(available[idx].clone())
     }
 

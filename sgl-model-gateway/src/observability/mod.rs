@@ -6,3 +6,4 @@ pub mod inflight_tracker;
 pub mod logging;
 pub mod metrics;
 pub mod otel_trace;
+pub mod process_metrics;

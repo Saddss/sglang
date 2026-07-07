@@ -926,6 +926,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         info!("Global health checks disabled via CLI/config; skipping health checker");
     }
 
+    // Publish process self-resource metrics (CPU/RSS/FDs/threads) off the
+    // request path. 10s sampling interval; negligible cost.
+    crate::observability::process_metrics::spawn(10);
+
     if let Some(ref load_monitor) = app_context.load_monitor {
         load_monitor.start().await;
         debug!("Started LoadMonitor for PowerOfTwo policies");

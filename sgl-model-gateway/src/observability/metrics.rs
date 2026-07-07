@@ -245,6 +245,34 @@ pub(crate) fn init_metrics() {
         "smg_manual_policy_cache_entries",
         "Number of routing entries in manual policy cache"
     );
+    describe_counter!(
+        "smg_worker_routed_total",
+        "Requests routed to each worker by worker(url) and model \
+         (per-engine QPS / load balance: spread = max(rate)/avg(rate))"
+    );
+    describe_counter!(
+        "smg_cache_aware_route_total",
+        "cache_aware routing decision by branch \
+         (sticky_hit|sticky_miss|first_touch|imbalanced|no_tree); \
+         session stickiness rate = sticky_hit / (sticky_hit + sticky_miss)"
+    );
+
+    // Process self-resource metrics (sampled off the request path by a
+    // background task; see observability::process_metrics)
+    describe_counter!(
+        "smg_process_cpu_ms_total",
+        "Cumulative process CPU time in milliseconds (user+system); \
+         cores = rate(smg_process_cpu_ms_total[1m]) / 1000"
+    );
+    describe_gauge!(
+        "smg_process_resident_memory_bytes",
+        "Process resident set size (RSS) in bytes"
+    );
+    describe_gauge!(
+        "smg_process_open_fds",
+        "Number of open file descriptors held by the process"
+    );
+    describe_gauge!("smg_process_threads", "Number of OS threads in the process");
 
     // Layer 3: Worker resilience metrics (circuit breaker)
     describe_gauge!(
@@ -445,6 +473,20 @@ pub mod metrics_labels {
     pub const ERROR_BACKEND: &str = "backend_error";
     pub const ERROR_VALIDATION: &str = "validation_error";
     pub const ERROR_INTERNAL: &str = "internal_error";
+
+    // cache_aware routing branches (session stickiness observability)
+    /// Repeat request whose prefix had a prior tenant and was routed to that
+    /// same worker (affinity honored, no fallback).
+    pub const CACHE_AWARE_STICKY_HIT: &str = "sticky_hit";
+    /// Repeat request whose prefix had a prior tenant but was NOT routed to it
+    /// (match below threshold, or tenant unhealthy → fell back).
+    pub const CACHE_AWARE_STICKY_MISS: &str = "sticky_miss";
+    /// First-touch request: prefix had no prior tenant (new session/prefix).
+    pub const CACHE_AWARE_FIRST_TOUCH: &str = "first_touch";
+    /// Load-imbalance guard fired → routed to least-loaded worker (cache skipped).
+    pub const CACHE_AWARE_IMBALANCED: &str = "imbalanced";
+    /// Tree not yet seeded → random fallback (should be ~0 in steady state).
+    pub const CACHE_AWARE_NO_TREE: &str = "no_tree";
 }
 
 /// SMG Metrics helper struct for the new layered metrics architecture.
@@ -860,6 +902,54 @@ impl Metrics {
             "policy" => policy
         )
         .increment(1);
+    }
+
+    /// Record that a request was routed to a specific worker.
+    ///
+    /// Emits `smg_worker_routed_total{worker,model}` — enables per-engine QPS
+    /// and load-balance (spread) dashboards. Same cost class as the existing
+    /// per-request counters (`record_router_request` etc.): an interned label
+    /// lookup + atomic increment.
+    pub fn record_worker_routed(worker: &str, model_id: &str) {
+        let worker = intern_string(worker);
+        let model = intern_string(model_id);
+        counter!(
+            "smg_worker_routed_total",
+            "worker" => worker,
+            "model" => model
+        )
+        .increment(1);
+    }
+
+    /// Record a cache_aware routing decision branch (session stickiness).
+    ///
+    /// `branch` is one of the `metrics_labels::CACHE_AWARE_*` static strings.
+    pub fn record_cache_aware_route(branch: &'static str) {
+        counter!(
+            "smg_cache_aware_route_total",
+            "branch" => branch
+        )
+        .increment(1);
+    }
+
+    /// Set process resident memory (RSS) in bytes.
+    pub fn set_process_resident_memory_bytes(bytes: u64) {
+        gauge!("smg_process_resident_memory_bytes").set(bytes as f64);
+    }
+
+    /// Set process open file descriptor count.
+    pub fn set_process_open_fds(count: u64) {
+        gauge!("smg_process_open_fds").set(count as f64);
+    }
+
+    /// Set process OS thread count.
+    pub fn set_process_threads(count: u64) {
+        gauge!("smg_process_threads").set(count as f64);
+    }
+
+    /// Add elapsed process CPU time (milliseconds) since the last sample.
+    pub fn add_process_cpu_ms(delta_ms: u64) {
+        counter!("smg_process_cpu_ms_total").increment(delta_ms);
     }
 
     /// Record worker error

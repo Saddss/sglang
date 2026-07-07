@@ -72,6 +72,7 @@ use super::{
     CacheAwareConfig, LoadBalancingPolicy, SelectWorkerInfo,
 };
 use crate::core::{Worker, WorkerType, UNKNOWN_MODEL_ID};
+use crate::observability::metrics::{metrics_labels, Metrics};
 
 /// Tag used to isolate prefill/decode/regular worker pools in the cache_aware tree key.
 ///
@@ -367,6 +368,7 @@ impl CacheAwarePolicy {
         // Increment processed counter
         workers[min_load_idx].increment_processed();
 
+        Metrics::record_cache_aware_route(metrics_labels::CACHE_AWARE_IMBALANCED);
         Some(min_load_idx)
     }
 }
@@ -446,6 +448,20 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
             };
 
             if let Some(idx) = selected_idx {
+                // Session-stickiness observability (reuses values already computed
+                // above — no extra tree work):
+                // - match_rate > threshold  → routed to the prior tenant (sticky_hit)
+                // - prior tenant existed but weak match → sticky_miss (rebalanced)
+                // - no prior tenant          → first_touch (new session/prefix)
+                let branch = if match_rate > self.config.cache_threshold {
+                    metrics_labels::CACHE_AWARE_STICKY_HIT
+                } else if result.matched_char_count > 0 {
+                    metrics_labels::CACHE_AWARE_STICKY_MISS
+                } else {
+                    metrics_labels::CACHE_AWARE_FIRST_TOUCH
+                };
+                Metrics::record_cache_aware_route(branch);
+
                 // Update the tree with this request (use worker URL directly, no allocation)
                 tree.insert(text, workers[idx].url());
 
@@ -487,6 +503,10 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
                 }
             }
 
+            // Reached only when a prior tenant matched above threshold but is now
+            // gone/unhealthy → affinity broke, request rebalanced.
+            Metrics::record_cache_aware_route(metrics_labels::CACHE_AWARE_STICKY_MISS);
+
             // Fallback to first healthy worker
             healthy_indices.first().copied()
         } else {
@@ -498,6 +518,7 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
                  clears",
                 tree_key
             );
+            Metrics::record_cache_aware_route(metrics_labels::CACHE_AWARE_NO_TREE);
             let mut rng = rand::rng();
             let random_idx = rng.random_range(0..healthy_indices.len());
             Some(healthy_indices[random_idx])
