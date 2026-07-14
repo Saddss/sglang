@@ -11,7 +11,9 @@ use tracing::{debug, info, warn};
 /// When the first worker of a new model is added, it determines the policy for that model.
 /// All subsequent workers of the same model use the established policy.
 /// When the last worker of a model is removed, the policy mapping is cleaned up.
-use super::{BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PolicyFactory};
+use super::{
+    BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PolicyFactory, TruncationAwarePolicy,
+};
 use crate::{config::types::PolicyConfig, core::Worker};
 
 /// Registry for managing model-to-policy mappings
@@ -189,6 +191,11 @@ impl PolicyRegistry {
             let mesh_sync = &*self.mesh_sync.read().unwrap();
             cache_aware.set_mesh_sync(mesh_sync.clone());
             Arc::new(cache_aware)
+        } else if policy_type == "truncation_aware" {
+            let mut policy = TruncationAwarePolicy::new();
+            let mesh_sync = &*self.mesh_sync.read().unwrap();
+            policy.set_mesh_sync(mesh_sync.clone());
+            Arc::new(policy)
         } else {
             PolicyFactory::create_by_name(policy_type).unwrap_or_else(|| {
                 warn!("Unknown policy type '{}', using default", policy_type);
@@ -308,6 +315,15 @@ impl PolicyRegistry {
                     );
                     cache_aware.init_workers(workers);
                 }
+            } else if policy.name() == "truncation_aware" {
+                if let Some(trunc) = policy.as_any().downcast_ref::<TruncationAwarePolicy>() {
+                    debug!(
+                        "Initializing truncation-aware sticky tree with {} workers for model {}",
+                        workers.len(),
+                        model_id
+                    );
+                    trunc.sticky_policy().init_workers(workers);
+                }
             }
         }
     }
@@ -322,6 +338,14 @@ impl PolicyRegistry {
                     cache_aware.remove_worker_by_url(worker_url);
                     debug!(
                         "Removed worker {} from cache-aware policy for model {}",
+                        worker_url, model_id
+                    );
+                }
+            } else if policy.name() == "truncation_aware" {
+                if let Some(trunc) = policy.as_any().downcast_ref::<TruncationAwarePolicy>() {
+                    trunc.sticky_policy().remove_worker_by_url(worker_url);
+                    debug!(
+                        "Removed worker {} from truncation-aware sticky tree for model {}",
                         worker_url, model_id
                     );
                 }
@@ -425,6 +449,12 @@ impl PolicyRegistry {
                 if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
                     cache_aware.apply_remote_tree_operation(model_id, operation);
                 }
+            } else if policy.name() == "truncation_aware" {
+                if let Some(trunc) = policy.as_any().downcast_ref::<TruncationAwarePolicy>() {
+                    trunc
+                        .sticky_policy()
+                        .apply_remote_tree_operation(model_id, operation);
+                }
             }
         }
 
@@ -436,6 +466,16 @@ impl PolicyRegistry {
                 .downcast_ref::<CacheAwarePolicy>()
             {
                 cache_aware.apply_remote_tree_operation(model_id, operation);
+            }
+        } else if self.default_policy.name() == "truncation_aware" {
+            if let Some(trunc) = self
+                .default_policy
+                .as_any()
+                .downcast_ref::<TruncationAwarePolicy>()
+            {
+                trunc
+                    .sticky_policy()
+                    .apply_remote_tree_operation(model_id, operation);
             }
         }
 

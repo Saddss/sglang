@@ -249,6 +249,70 @@ impl ConfigValidator {
                     });
                 }
             }
+            PolicyConfig::TruncationAware {
+                ewma_window_secs,
+                tick_secs: _,
+                cooldown_secs: _,
+                sticky_min,
+                deadband: _,
+                pressure_ratio,
+                cache_threshold,
+                balance_abs_threshold: _,
+                balance_rel_threshold,
+                eviction_interval_secs,
+                max_tree_size,
+            } => {
+                if *ewma_window_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "ewma_window_secs".to_string(),
+                        value: ewma_window_secs.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+                if *sticky_min == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "sticky_min".to_string(),
+                        value: sticky_min.to_string(),
+                        reason: "Must be >= 1 (the sticky pool may never be empty)".to_string(),
+                    });
+                }
+                if *pressure_ratio < 1.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "pressure_ratio".to_string(),
+                        value: pressure_ratio.to_string(),
+                        reason: "Must be >= 1.0".to_string(),
+                    });
+                }
+                // Embedded sticky pool: same constraints as cache_aware.
+                if !(0.0..=1.0).contains(cache_threshold) {
+                    return Err(ConfigError::InvalidValue {
+                        field: "cache_threshold".to_string(),
+                        value: cache_threshold.to_string(),
+                        reason: "Must be between 0.0 and 1.0".to_string(),
+                    });
+                }
+                if *balance_rel_threshold < 1.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "balance_rel_threshold".to_string(),
+                        value: balance_rel_threshold.to_string(),
+                        reason: "Must be >= 1.0".to_string(),
+                    });
+                }
+                if *eviction_interval_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "eviction_interval_secs".to_string(),
+                        value: eviction_interval_secs.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+                if *max_tree_size == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "max_tree_size".to_string(),
+                        value: max_tree_size.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+            }
         }
         Ok(())
     }

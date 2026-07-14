@@ -20,6 +20,7 @@ mod prefix_hash;
 mod random;
 mod registry;
 mod round_robin;
+mod truncation_aware;
 pub mod tree;
 pub(crate) mod utils;
 pub use bucket::BucketPolicy;
@@ -33,6 +34,7 @@ pub use random::RandomPolicy;
 pub use registry::PolicyRegistry;
 pub use round_robin::RoundRobinPolicy;
 pub use tree::PrefixMatchResult;
+pub use truncation_aware::{TruncationAwareConfig, TruncationAwarePolicy};
 
 /// Core trait for load balancing policies
 ///
@@ -171,6 +173,9 @@ pub struct SelectWorkerInfo<'a> {
     /// Pre-computed hash ring for O(log n) consistent hashing
     /// Built and cached by WorkerRegistry, passed through to avoid per-request rebuilds
     pub hash_ring: Option<Arc<HashRing>>,
+    /// Request is a truncation turn (body `enable_kv_evict=true`): its prefix
+    /// KV is not reusable, so affinity policies should not stick it.
+    pub truncated: bool,
 }
 
 #[cfg(test)]

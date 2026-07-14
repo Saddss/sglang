@@ -5,7 +5,8 @@ use std::sync::Arc;
 use super::{
     BucketConfig, BucketPolicy, CacheAwareConfig, CacheAwarePolicy, ConsistentHashingPolicy,
     LoadBalancingPolicy, ManualConfig, ManualPolicy, PowerOfTwoPolicy, PrefixHashConfig,
-    PrefixHashPolicy, RandomPolicy, RoundRobinPolicy,
+    PrefixHashPolicy, RandomPolicy, RoundRobinPolicy, TruncationAwareConfig,
+    TruncationAwarePolicy,
 };
 use crate::config::PolicyConfig;
 
@@ -70,6 +71,36 @@ impl PolicyFactory {
                 };
                 Arc::new(PrefixHashPolicy::new(config))
             }
+            PolicyConfig::TruncationAware {
+                ewma_window_secs,
+                tick_secs,
+                cooldown_secs,
+                sticky_min,
+                deadband,
+                pressure_ratio,
+                cache_threshold,
+                balance_abs_threshold,
+                balance_rel_threshold,
+                eviction_interval_secs,
+                max_tree_size,
+            } => {
+                let config = TruncationAwareConfig {
+                    ewma_window_secs: *ewma_window_secs,
+                    tick_secs: *tick_secs,
+                    cooldown_secs: *cooldown_secs,
+                    sticky_min: *sticky_min,
+                    deadband: *deadband,
+                    pressure_ratio: *pressure_ratio,
+                    cache_aware: CacheAwareConfig {
+                        cache_threshold: *cache_threshold,
+                        balance_abs_threshold: *balance_abs_threshold,
+                        balance_rel_threshold: *balance_rel_threshold,
+                        eviction_interval_secs: *eviction_interval_secs,
+                        max_tree_size: *max_tree_size,
+                    },
+                };
+                Arc::new(TruncationAwarePolicy::with_config(config))
+            }
         }
     }
 
@@ -86,6 +117,9 @@ impl PolicyFactory {
                 Some(Arc::new(ConsistentHashingPolicy::new()))
             }
             "prefix_hash" | "prefixhash" => Some(Arc::new(PrefixHashPolicy::with_defaults())),
+            "truncation_aware" | "truncationaware" => {
+                Some(Arc::new(TruncationAwarePolicy::new()))
+            }
             _ => None,
         }
     }
@@ -133,6 +167,21 @@ mod tests {
 
         let policy = PolicyFactory::create_from_config(&PolicyConfig::ConsistentHashing);
         assert_eq!(policy.name(), "consistent_hashing");
+
+        let policy = PolicyFactory::create_from_config(&PolicyConfig::TruncationAware {
+            ewma_window_secs: 60,
+            tick_secs: 0,
+            cooldown_secs: 300,
+            sticky_min: 1,
+            deadband: 0,
+            pressure_ratio: 4.0,
+            cache_threshold: 0.7,
+            balance_abs_threshold: 10,
+            balance_rel_threshold: 1.5,
+            eviction_interval_secs: 30,
+            max_tree_size: 1000,
+        });
+        assert_eq!(policy.name(), "truncation_aware");
     }
 
     #[tokio::test]
@@ -151,6 +200,8 @@ mod tests {
         assert!(PolicyFactory::create_by_name("Manual").is_some());
         assert!(PolicyFactory::create_by_name("consistent_hashing").is_some());
         assert!(PolicyFactory::create_by_name("ConsistentHashing").is_some());
+        assert!(PolicyFactory::create_by_name("truncation_aware").is_some());
+        assert!(PolicyFactory::create_by_name("TruncationAware").is_some());
         assert!(PolicyFactory::create_by_name("unknown").is_none());
     }
 }

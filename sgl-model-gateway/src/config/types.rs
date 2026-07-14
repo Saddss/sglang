@@ -320,6 +320,58 @@ pub enum PolicyConfig {
         #[serde(default = "default_load_factor")]
         load_factor: f64,
     },
+
+    /// Truncation-aware routing: splits workers into a sticky pool (embedded
+    /// cache_aware) and an auto-sized truncation pool for requests flagged
+    /// with body `enable_kv_evict` (their prefix KV is unusable, so they get
+    /// min-load spreading instead of affinity and never touch the tree).
+    #[serde(rename = "truncation_aware")]
+    TruncationAware {
+        /// EWMA window for the truncated-request share (seconds, default 60)
+        #[serde(default = "default_trunc_ewma_window_secs")]
+        ewma_window_secs: u64,
+        /// Controller tick interval (seconds, default 30)
+        #[serde(default = "default_trunc_tick_secs")]
+        tick_secs: u64,
+        /// Cooldown between pool size adjustments (seconds, default 300)
+        #[serde(default = "default_trunc_cooldown_secs")]
+        cooldown_secs: u64,
+        /// Minimum sticky pool size (default 1)
+        #[serde(default = "default_trunc_sticky_min")]
+        sticky_min: usize,
+        /// Resize deadband (default 0)
+        #[serde(default)]
+        deadband: usize,
+        /// Pressure alert ratio (default 4.0)
+        #[serde(default = "default_trunc_pressure_ratio")]
+        pressure_ratio: f32,
+        /// Embedded sticky cache_aware knobs
+        cache_threshold: f32,
+        balance_abs_threshold: usize,
+        balance_rel_threshold: f32,
+        eviction_interval_secs: u64,
+        max_tree_size: usize,
+    },
+}
+
+fn default_trunc_ewma_window_secs() -> u64 {
+    60
+}
+
+fn default_trunc_tick_secs() -> u64 {
+    30
+}
+
+fn default_trunc_cooldown_secs() -> u64 {
+    300
+}
+
+fn default_trunc_sticky_min() -> usize {
+    1
+}
+
+fn default_trunc_pressure_ratio() -> f32 {
+    4.0
 }
 
 fn default_prefix_token_count() -> usize {
@@ -349,6 +401,7 @@ impl PolicyConfig {
             PolicyConfig::Manual { .. } => "manual",
             PolicyConfig::ConsistentHashing => "consistent_hashing",
             PolicyConfig::PrefixHash { .. } => "prefix_hash",
+            PolicyConfig::TruncationAware { .. } => "truncation_aware",
         }
     }
 }

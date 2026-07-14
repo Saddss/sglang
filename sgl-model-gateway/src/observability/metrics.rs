@@ -263,6 +263,37 @@ pub(crate) fn init_metrics() {
          session stickiness rate = sticky_hit / (sticky_hit + sticky_miss)"
     );
 
+    // truncation_aware policy (sticky pool / truncation pool split)
+    describe_gauge!(
+        "smg_router_truncated_share",
+        "EWMA share of truncation-flagged requests (enable_kv_evict) by model; \
+         drives the truncation pool size K = round(N * share)"
+    );
+    describe_gauge!(
+        "smg_router_pool_size",
+        "truncation_aware pool membership count by model and pool (sticky|truncation)"
+    );
+    describe_counter!(
+        "smg_router_pool_resize_total",
+        "truncation pool size K adjustments by model and direction (grow|shrink)"
+    );
+    describe_counter!(
+        "smg_router_pool_evicted_tenants_total",
+        "Workers evicted from the sticky cache-aware tree because they moved \
+         into the truncation pool (each eviction rebalances that worker's sessions)"
+    );
+    describe_gauge!(
+        "smg_router_trunc_pool_pressure",
+        "1 when truncation pool per-worker inflight exceeds pressure_ratio x sticky \
+         pool per-worker inflight (capacity alert; the controller never steals \
+         sticky workers), else 0"
+    );
+    describe_counter!(
+        "smg_truncation_route_total",
+        "truncation_aware routing decision by branch \
+         (trunc_pool|trunc_fallback_all|sticky|sticky_spill)"
+    );
+
     // Process self-resource metrics (sampled off the request path by a
     // background task; see observability::process_metrics)
     describe_counter!(
@@ -504,6 +535,25 @@ pub mod metrics_labels {
     pub const CACHE_AWARE_IMBALANCED: &str = "imbalanced";
     /// Tree not yet seeded → random fallback (should be ~0 in steady state).
     pub const CACHE_AWARE_NO_TREE: &str = "no_tree";
+
+    // truncation_aware routing branches
+    /// Truncation-flagged request routed inside the truncation pool (min load).
+    pub const TRUNCATION_TRUNC_POOL: &str = "trunc_pool";
+    /// Truncation-flagged request but pool empty (K=0 or all unhealthy) →
+    /// spread over all workers by min load, still no tree insert.
+    pub const TRUNCATION_FALLBACK_ALL: &str = "trunc_fallback_all";
+    /// Unflagged request routed via the inner cache_aware sticky policy.
+    pub const TRUNCATION_STICKY: &str = "sticky";
+    /// Unflagged request but sticky pool empty → spilled into truncation pool.
+    pub const TRUNCATION_STICKY_SPILL: &str = "sticky_spill";
+
+    // truncation pool resize directions
+    pub const POOL_RESIZE_GROW: &str = "grow";
+    pub const POOL_RESIZE_SHRINK: &str = "shrink";
+
+    // pool names
+    pub const POOL_STICKY: &str = "sticky";
+    pub const POOL_TRUNCATION: &str = "truncation";
 }
 
 /// SMG Metrics helper struct for the new layered metrics architecture.
@@ -960,6 +1010,67 @@ impl Metrics {
     pub fn record_cache_aware_route(branch: &'static str) {
         counter!(
             "smg_cache_aware_route_total",
+            "branch" => branch
+        )
+        .increment(1);
+    }
+
+    // ========================================================================
+    // truncation_aware policy metrics
+    // ========================================================================
+
+    /// Set the EWMA truncated-request share for a model.
+    pub fn set_truncated_share(model_id: &str, share: f64) {
+        let model = intern_string(model_id);
+        gauge!("smg_router_truncated_share", "model" => model).set(share);
+    }
+
+    /// Set current pool sizes (sticky and truncation) for a model.
+    pub fn set_truncation_pool_sizes(model_id: &str, sticky: usize, truncation: usize) {
+        let model = intern_string(model_id);
+        gauge!(
+            "smg_router_pool_size",
+            "model" => Arc::clone(&model),
+            "pool" => metrics_labels::POOL_STICKY
+        )
+        .set(sticky as f64);
+        gauge!(
+            "smg_router_pool_size",
+            "model" => model,
+            "pool" => metrics_labels::POOL_TRUNCATION
+        )
+        .set(truncation as f64);
+    }
+
+    /// Record a truncation pool resize (direction: POOL_RESIZE_GROW/SHRINK).
+    pub fn record_truncation_pool_resize(model_id: &str, direction: &'static str) {
+        let model = intern_string(model_id);
+        counter!(
+            "smg_router_pool_resize_total",
+            "model" => model,
+            "direction" => direction
+        )
+        .increment(1);
+    }
+
+    /// Record a worker evicted from the sticky tree after moving to the
+    /// truncation pool.
+    pub fn record_truncation_pool_evicted_tenant() {
+        counter!("smg_router_pool_evicted_tenants_total").increment(1);
+    }
+
+    /// Set the truncation pool pressure alert bit.
+    pub fn set_truncation_pool_pressure(model_id: &str, pressured: bool) {
+        let model = intern_string(model_id);
+        gauge!("smg_router_trunc_pool_pressure", "model" => model)
+            .set(if pressured { 1.0 } else { 0.0 });
+    }
+
+    /// Record a truncation_aware routing decision branch
+    /// (`metrics_labels::TRUNCATION_*`).
+    pub fn record_truncation_route(branch: &'static str) {
+        counter!(
+            "smg_truncation_route_total",
             "branch" => branch
         )
         .increment(1);

@@ -147,7 +147,7 @@ struct CliArgs {
 
     // ==================== Routing Policy ====================
     /// Load balancing policy to use
-    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "prefix_hash", "manual"], help_heading = "Routing Policy")]
+    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "prefix_hash", "manual", "truncation_aware"], help_heading = "Routing Policy")]
     policy: String,
 
     /// Cache threshold (0.0-1.0) for cache-aware routing
@@ -185,6 +185,30 @@ struct CliArgs {
     /// Load factor threshold for prefix_hash policy
     #[arg(long, default_value_t = 1.25, help_heading = "Routing Policy")]
     prefix_hash_load_factor: f64,
+
+    /// EWMA window (seconds) for the truncated-request share (truncation_aware policy)
+    #[arg(long, default_value_t = 60, help_heading = "Routing Policy")]
+    trunc_ewma_window_secs: u64,
+
+    /// Controller tick interval in seconds (truncation_aware policy)
+    #[arg(long, default_value_t = 30, help_heading = "Routing Policy")]
+    trunc_tick_secs: u64,
+
+    /// Cooldown in seconds between truncation pool resizes (truncation_aware policy)
+    #[arg(long, default_value_t = 300, help_heading = "Routing Policy")]
+    trunc_cooldown_secs: u64,
+
+    /// Minimum sticky pool size (truncation_aware policy)
+    #[arg(long, default_value_t = 1, help_heading = "Routing Policy")]
+    trunc_sticky_min: usize,
+
+    /// Resize deadband (truncation_aware policy)
+    #[arg(long, default_value_t = 0, help_heading = "Routing Policy")]
+    trunc_deadband: usize,
+
+    /// Pressure alert ratio: truncation pool per-worker inflight vs sticky (truncation_aware policy)
+    #[arg(long, default_value_t = 4.0, help_heading = "Routing Policy")]
+    trunc_pressure_ratio: f32,
 
     /// Enable data parallelism aware scheduling
     #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
@@ -773,6 +797,20 @@ impl CliArgs {
             "prefix_hash" => PolicyConfig::PrefixHash {
                 prefix_token_count: self.prefix_token_count,
                 load_factor: self.prefix_hash_load_factor,
+            },
+            "truncation_aware" => PolicyConfig::TruncationAware {
+                ewma_window_secs: self.trunc_ewma_window_secs,
+                tick_secs: self.trunc_tick_secs,
+                cooldown_secs: self.trunc_cooldown_secs,
+                sticky_min: self.trunc_sticky_min,
+                deadband: self.trunc_deadband,
+                pressure_ratio: self.trunc_pressure_ratio,
+                // The embedded sticky pool reuses the standard cache_aware flags.
+                cache_threshold: self.cache_threshold,
+                balance_abs_threshold: self.balance_abs_threshold,
+                balance_rel_threshold: self.balance_rel_threshold,
+                eviction_interval_secs: self.eviction_interval,
+                max_tree_size: self.max_tree_size,
             },
             "manual" => PolicyConfig::Manual {
                 eviction_interval_secs: self.eviction_interval,

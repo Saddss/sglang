@@ -1086,6 +1086,7 @@ impl PDRouter {
                     tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
                     headers,
                     hash_ring,
+                    truncated: false, // truncation-aware routing is regular-mode only for now
                 },
             )
             .await

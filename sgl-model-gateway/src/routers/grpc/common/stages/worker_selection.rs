@@ -175,6 +175,7 @@ impl WorkerSelectionStage {
                     tokens,
                     headers,
                     hash_ring,
+                    truncated: false, // truncation-aware routing is HTTP-only for now
                 },
             )
             .await?;
@@ -246,6 +247,7 @@ impl WorkerSelectionStage {
             tokens,
             headers,
             hash_ring,
+            truncated: false, // truncation-aware routing is HTTP-only for now
         };
         let prefill_idx = policy.select_worker(&available_prefill, &info).await?;
         let decode_idx = policy.select_worker(&available_decode, &info).await?;

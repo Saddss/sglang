@@ -136,6 +136,7 @@ impl Router {
         model_id: Option<&str>,
         text: Option<&str>,
         headers: Option<&HeaderMap>,
+        truncated: bool,
     ) -> Option<Arc<dyn Worker>> {
         let effective_model_id = if !self.enable_igw { None } else { model_id };
 
@@ -176,6 +177,7 @@ impl Router {
                     tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
                     headers,
                     hash_ring,
+                    truncated,
                 },
             )
             .await?;
@@ -289,7 +291,7 @@ impl Router {
         // request prep) up to just before the upstream send. Excludes engine wait.
         let dispatch_start = Instant::now();
         let worker = match self
-            .select_worker_for_model(model_id, Some(text), headers)
+            .select_worker_for_model(model_id, Some(text), headers, typed_req.is_truncated())
             .await
         {
             Some(w) => w,
