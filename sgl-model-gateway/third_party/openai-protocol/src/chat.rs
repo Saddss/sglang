@@ -360,6 +360,13 @@ pub struct ChatCompletionRequest {
     /// Random seed for sampling for deterministic outputs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling_seed: Option<u64>,
+
+    /// Business extension (chat-service): this turn's history was truncated,
+    /// so its prefix KV is not reusable. Consumed by the engine (KV evict)
+    /// and by the truncation_aware routing policy; must survive the router's
+    /// parse→serialize round trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_kv_evict: Option<bool>,
 }
 
 // ============================================================================
@@ -639,6 +646,10 @@ impl GenerationRequest for ChatCompletionRequest {
         Some(&self.model)
     }
 
+    fn is_truncated(&self) -> bool {
+        self.enable_kv_evict.unwrap_or(false)
+    }
+
     fn extract_text_for_routing(&self) -> String {
         // Extract text from messages for routing decisions
         // Use a single buffer to avoid intermediate Vec<String> allocations
@@ -797,4 +808,41 @@ pub struct ChatStreamChoice {
     pub finish_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_stop: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::GenerationRequest;
+
+    fn minimal_request_json(extra: &str) -> String {
+        format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":"hi"}}]{}}}"#,
+            extra
+        )
+    }
+
+    // The router deserializes the body into this struct and re-serializes it
+    // before forwarding; enable_kv_evict must survive that round trip.
+    #[test]
+    fn test_enable_kv_evict_round_trip() {
+        let req: ChatCompletionRequest =
+            serde_json::from_str(&minimal_request_json(r#","enable_kv_evict":true"#)).unwrap();
+        assert_eq!(req.enable_kv_evict, Some(true));
+        assert!(req.is_truncated());
+
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out.get("enable_kv_evict"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn test_enable_kv_evict_absent_not_injected() {
+        let req: ChatCompletionRequest =
+            serde_json::from_str(&minimal_request_json("")).unwrap();
+        assert_eq!(req.enable_kv_evict, None);
+        assert!(!req.is_truncated());
+
+        let out = serde_json::to_value(&req).unwrap();
+        assert!(out.get("enable_kv_evict").is_none());
+    }
 }
