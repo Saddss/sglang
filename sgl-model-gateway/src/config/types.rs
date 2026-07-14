@@ -321,10 +321,8 @@ pub enum PolicyConfig {
         load_factor: f64,
     },
 
-    /// Truncation-aware routing: splits workers into a sticky pool (embedded
-    /// cache_aware) and an auto-sized truncation pool for requests flagged
-    /// with body `enable_kv_evict` (their prefix KV is unusable, so they get
-    /// min-load spreading instead of affinity and never touch the tree).
+    /// Sticky pool (embedded cache_aware) + auto-sized truncation pool for
+    /// `enable_kv_evict`-flagged requests; see `policies/truncation_aware.rs`.
     #[serde(rename = "truncation_aware")]
     TruncationAware {
         /// EWMA window for the truncated-request share (seconds, default 60)

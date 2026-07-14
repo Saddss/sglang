@@ -275,7 +275,12 @@ pub(crate) fn init_metrics() {
     );
     describe_counter!(
         "smg_router_pool_resize_total",
-        "truncation pool size K adjustments by model and direction (grow|shrink)"
+        "truncation pool size K adjustments by model, direction (grow|shrink), and reason"
+    );
+    describe_gauge!(
+        "smg_router_pool_inflight_per_worker",
+        "Average in-flight requests per worker by model and pool (sticky|truncation), \
+         sampled on the truncation_aware controller tick"
     );
     describe_counter!(
         "smg_router_pool_evicted_tenants_total",
@@ -539,17 +544,19 @@ pub mod metrics_labels {
     // truncation_aware routing branches
     /// Truncation-flagged request routed inside the truncation pool (min load).
     pub const TRUNCATION_TRUNC_POOL: &str = "trunc_pool";
-    /// Truncation-flagged request but pool empty (K=0 or all unhealthy) →
-    /// spread over all workers by min load, still no tree insert.
+    /// Truncation-flagged request but no healthy truncation member present
+    /// (K=0 or all flapped) → spread over the healthy set by min load, still
+    /// no tree insert.
     pub const TRUNCATION_FALLBACK_ALL: &str = "trunc_fallback_all";
     /// Unflagged request routed via the inner cache_aware sticky policy.
     pub const TRUNCATION_STICKY: &str = "sticky";
     /// Unflagged request but sticky pool empty → spilled into truncation pool.
     pub const TRUNCATION_STICKY_SPILL: &str = "sticky_spill";
 
-    // truncation pool resize directions
+    // truncation pool resize directions and reasons
     pub const POOL_RESIZE_GROW: &str = "grow";
     pub const POOL_RESIZE_SHRINK: &str = "shrink";
+    pub const POOL_RESIZE_REASON_SHARE: &str = "share";
 
     // pool names
     pub const POOL_STICKY: &str = "sticky";
@@ -1043,14 +1050,30 @@ impl Metrics {
     }
 
     /// Record a truncation pool resize (direction: POOL_RESIZE_GROW/SHRINK).
-    pub fn record_truncation_pool_resize(model_id: &str, direction: &'static str) {
+    pub fn record_truncation_pool_resize(
+        model_id: &str,
+        direction: &'static str,
+        reason: &'static str,
+    ) {
         let model = intern_string(model_id);
         counter!(
             "smg_router_pool_resize_total",
             "model" => model,
-            "direction" => direction
+            "direction" => direction,
+            "reason" => reason
         )
         .increment(1);
+    }
+
+    /// Set the average in-flight requests per worker for a pool.
+    pub fn set_pool_inflight_per_worker(model_id: &str, pool: &'static str, avg: f64) {
+        let model = intern_string(model_id);
+        gauge!(
+            "smg_router_pool_inflight_per_worker",
+            "model" => model,
+            "pool" => pool
+        )
+        .set(avg);
     }
 
     /// Record a worker evicted from the sticky tree after moving to the

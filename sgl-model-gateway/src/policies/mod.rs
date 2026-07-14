@@ -173,8 +173,8 @@ pub struct SelectWorkerInfo<'a> {
     /// Pre-computed hash ring for O(log n) consistent hashing
     /// Built and cached by WorkerRegistry, passed through to avoid per-request rebuilds
     pub hash_ring: Option<Arc<HashRing>>,
-    /// Request is a truncation turn (body `enable_kv_evict=true`): its prefix
-    /// KV is not reusable, so affinity policies should not stick it.
+    /// Truncation-turn flag from body `enable_kv_evict`; see the
+    /// `truncation_aware` module docs for the routing semantics.
     pub truncated: bool,
 }
 

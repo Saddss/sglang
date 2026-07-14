@@ -37,8 +37,7 @@ pub trait GenerationRequest: Send + Sync {
     /// Extract text content for routing decisions
     fn extract_text_for_routing(&self) -> String;
 
-    /// Whether this request is flagged as a truncation turn (its prefix KV is
-    /// not reusable anywhere). Only chat requests carry the flag today.
+    /// Truncation-turn flag (see `enable_kv_evict` in chat.rs). Default false.
     fn is_truncated(&self) -> bool {
         false
     }

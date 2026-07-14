@@ -361,10 +361,9 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling_seed: Option<u64>,
 
-    /// Business extension (chat-service): this turn's history was truncated,
-    /// so its prefix KV is not reusable. Consumed by the engine (KV evict)
-    /// and by the truncation_aware routing policy; must survive the router's
-    /// parse→serialize round trip.
+    /// chat-service truncation flag, consumed by the engine (KV evict) and
+    /// the router's truncation_aware policy. Declared so it survives the
+    /// router's parse→serialize round trip (undeclared fields are dropped).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_kv_evict: Option<bool>,
 }
