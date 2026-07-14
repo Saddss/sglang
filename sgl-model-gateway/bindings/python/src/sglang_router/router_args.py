@@ -31,6 +31,7 @@ _POLICY_CHOICES = (
     "manual",
     "consistent_hashing",
     "prefix_hash",
+    "truncation_aware",
 )
 
 
@@ -61,6 +62,13 @@ class RouterArgs:
     balance_rel_threshold: float = 1.5
     eviction_interval_secs: int = 60
     max_tree_size: int = 2**26
+    # truncation_aware policy knobs
+    trunc_ewma_window_secs: int = 60
+    trunc_tick_secs: int = 30
+    trunc_cooldown_secs: int = 300
+    trunc_sticky_min: int = 1
+    trunc_deadband: int = 0
+    trunc_pressure_ratio: float = 4.0
     max_idle_secs: int = 4 * 3600
     assignment_mode: str = "random"  # Mode for manual policy new routing key assignment
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
@@ -336,6 +344,42 @@ class RouterArgs:
             type=int,
             default=RouterArgs.max_tree_size,
             help="Maximum size of the approximation tree for cache-aware routing",
+        )
+        routing_group.add_argument(
+            f"--{prefix}trunc-ewma-window-secs",
+            type=int,
+            default=RouterArgs.trunc_ewma_window_secs,
+            help="EWMA window in seconds for the truncated-request share (truncation_aware policy)",
+        )
+        routing_group.add_argument(
+            f"--{prefix}trunc-tick-secs",
+            type=int,
+            default=RouterArgs.trunc_tick_secs,
+            help="Controller tick interval in seconds (truncation_aware policy)",
+        )
+        routing_group.add_argument(
+            f"--{prefix}trunc-cooldown-secs",
+            type=int,
+            default=RouterArgs.trunc_cooldown_secs,
+            help="Cooldown in seconds between truncation pool size adjustments (truncation_aware policy)",
+        )
+        routing_group.add_argument(
+            f"--{prefix}trunc-sticky-min",
+            type=int,
+            default=RouterArgs.trunc_sticky_min,
+            help="Minimum number of workers kept in the sticky pool (truncation_aware policy)",
+        )
+        routing_group.add_argument(
+            f"--{prefix}trunc-deadband",
+            type=int,
+            default=RouterArgs.trunc_deadband,
+            help="Resize deadband: |K*-K| must exceed this to resize (truncation_aware policy)",
+        )
+        routing_group.add_argument(
+            f"--{prefix}trunc-pressure-ratio",
+            type=float,
+            default=RouterArgs.trunc_pressure_ratio,
+            help="Pressure alert when truncation-pool per-worker inflight exceeds this multiple of the sticky pool (truncation_aware policy)",
         )
         routing_group.add_argument(
             f"--{prefix}max-idle-secs",
