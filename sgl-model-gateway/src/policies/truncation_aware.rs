@@ -410,6 +410,18 @@ impl TruncationAwarePolicy {
         &self.sticky
     }
 
+    /// Seed/re-seed the sticky tree from the registry worker set, then
+    /// re-apply the current partition: `CacheAwarePolicy::init_workers` adds
+    /// every worker to the tree, which must not resurrect truncation members.
+    pub fn init_workers(&self, workers: &[Arc<dyn Worker>]) {
+        self.sticky.init_workers(workers);
+        for entry in self.models.iter() {
+            for url in entry.value().trunc_urls.read().unwrap().iter() {
+                self.sticky.remove_worker_by_url(url);
+            }
+        }
+    }
+
     fn ensure_controller(&self) {
         if self.config.tick_secs == 0 {
             return;
@@ -998,6 +1010,32 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(snapshot, trunc_set, "membership must not change on a flap");
+    }
+
+    #[tokio::test]
+    async fn test_init_workers_does_not_resurrect_trunc_members() {
+        let policy = TruncationAwarePolicy::with_config(test_config());
+        let workers = make_workers(4);
+        policy.init_workers(&workers);
+        policy.test_force_partition(&workers, 1);
+
+        // Registry re-init (worker update path) re-seeds the tree; truncation
+        // members must be removed again afterwards.
+        policy.init_workers(&workers);
+
+        let trunc_set = compute_trunc_set(&entries(&workers), 1);
+        let info = SelectWorkerInfo {
+            request_text: Some("post-reinit stickiness probe"),
+            truncated: false,
+            ..Default::default()
+        };
+        for _ in 0..8 {
+            let idx = policy.select_worker(&workers, &info).await.unwrap();
+            assert!(
+                !trunc_set.contains(workers[idx].url()),
+                "sticky traffic must not land on a truncation member after re-init"
+            );
+        }
     }
 
     #[tokio::test]

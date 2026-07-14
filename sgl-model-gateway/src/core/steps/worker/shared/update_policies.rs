@@ -118,7 +118,9 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for UpdatePolicie
             // Check for configuration conflicts between prefill and decode
             self.check_worker_conflicts(&model_id, &all_workers);
             if let Some(policy) = app_context.policy_registry.get_policy(&model_id) {
-                if policy.name() == "cache_aware" {
+                // truncation_aware embeds a cache_aware sticky tree that needs
+                // the same seeding (init_cache_aware_policy dispatches on name).
+                if matches!(policy.name(), "cache_aware" | "truncation_aware") {
                     app_context
                         .policy_registry
                         .init_cache_aware_policy(&model_id, &all_workers);

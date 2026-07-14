@@ -322,7 +322,7 @@ impl PolicyRegistry {
                         workers.len(),
                         model_id
                     );
-                    trunc.sticky_policy().init_workers(workers);
+                    trunc.init_workers(workers);
                 }
             }
         }
