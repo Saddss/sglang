@@ -265,7 +265,25 @@ fn update_share_and_k(model: &str, state: &ModelState, config: &TruncationAwareC
         return;
     }
 
-    let current_k = state.k.load(Ordering::Relaxed);
+    // Capacity-forced clamp when the worker set shrinks: not a controller
+    // step (no cooldown), otherwise a stale large K would re-apply in one
+    // shot when capacity recovers, evicting several workers in a single tick.
+    let upper = n.saturating_sub(config.sticky_min);
+    let mut current_k = state.k.load(Ordering::Relaxed);
+    if current_k > upper {
+        state.k.store(upper, Ordering::Relaxed);
+        Metrics::record_truncation_pool_resize(
+            model,
+            metrics_labels::POOL_RESIZE_SHRINK,
+            metrics_labels::POOL_RESIZE_REASON_CLAMP,
+        );
+        info!(
+            "truncation pool ({}) clamped {} -> {} (n {}, sticky_min {})",
+            model, current_k, upper, n, config.sticky_min
+        );
+        current_k = upper;
+    }
+
     let new_k = next_k(current_k, share, n, config);
     if new_k == current_k {
         return;
@@ -415,6 +433,11 @@ impl TruncationAwarePolicy {
     /// every worker to the tree, which must not resurrect truncation members.
     pub fn init_workers(&self, workers: &[Arc<dyn Worker>]) {
         self.sticky.init_workers(workers);
+        for worker in workers {
+            if pool_pin(worker.as_ref()) == Some(POOL_LABEL_TRUNCATION) {
+                self.sticky.remove_worker_by_url(worker.url());
+            }
+        }
         for entry in self.models.iter() {
             for url in entry.value().trunc_urls.read().unwrap().iter() {
                 self.sticky.remove_worker_by_url(url);
@@ -439,6 +462,10 @@ impl TruncationAwarePolicy {
     }
 
     fn model_state(&self, model_key: &str) -> Arc<ModelState> {
+        // Fast path avoids the owned-key allocation on every request.
+        if let Some(state) = self.models.get(model_key) {
+            return Arc::clone(&state);
+        }
         self.models
             .entry(model_key.to_string())
             .or_insert_with(|| Arc::new(ModelState::new()))
@@ -786,6 +813,27 @@ mod tests {
         // No new requests this window: share must not decay toward 0.
         update_share_and_k("m", &state, &cfg);
         assert!((*state.ewma_share.lock().unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_controller_clamps_k_when_worker_set_shrinks() {
+        let cfg = TruncationAwareConfig {
+            ewma_window_secs: 30,
+            tick_secs: 30,
+            cooldown_secs: 3600, // cooldown must NOT block the capacity clamp
+            ..test_config()
+        };
+        let (state, _workers) = seeded_state(8);
+        state.k.store(5, Ordering::Relaxed);
+        *state.last_resize_at.lock().unwrap() = Some(Instant::now());
+
+        // Worker set shrinks to 3 (upper = 3 - sticky_min = 2).
+        let urls: Vec<String> = state.known.iter().map(|e| e.key().clone()).collect();
+        for url in urls.iter().take(5) {
+            state.known.remove(url);
+        }
+        update_share_and_k("m", &state, &cfg);
+        assert_eq!(state.k.load(Ordering::Relaxed), 2);
     }
 
     #[test]

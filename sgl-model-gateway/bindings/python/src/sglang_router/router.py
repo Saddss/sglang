@@ -172,6 +172,17 @@ class Router:
             routing. Default: 60
         max_payload_size: Maximum payload size in bytes. Default: 256MB
         max_tree_size: Maximum size of the approximation tree for cache-aware routing. Default: 2^24
+        trunc_ewma_window_secs: EWMA window in seconds for the truncated-request share
+            (truncation_aware policy). Default: 60
+        trunc_tick_secs: Controller tick interval in seconds (truncation_aware policy). Default: 30
+        trunc_cooldown_secs: Cooldown in seconds between truncation pool size adjustments
+            (truncation_aware policy). Default: 300
+        trunc_sticky_min: Minimum number of workers kept in the sticky pool
+            (truncation_aware policy). Default: 1
+        trunc_deadband: Resize deadband; |K*-K| must exceed this to resize
+            (truncation_aware policy). Default: 0
+        trunc_pressure_ratio: Pressure alert threshold as a multiple of the sticky pool's
+            per-worker inflight (truncation_aware policy). Default: 4.0
         dp_aware: Enable data parallelism aware schedule. Default: False
         enable_igw: Enable IGW (Inference-Gateway) mode for multi-model support. When enabled,
             the router can manage multiple models simultaneously with per-model load balancing

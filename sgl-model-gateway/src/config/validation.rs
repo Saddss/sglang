@@ -251,7 +251,7 @@ impl ConfigValidator {
             }
             PolicyConfig::TruncationAware {
                 ewma_window_secs,
-                tick_secs: _,
+                tick_secs,
                 cooldown_secs: _,
                 sticky_min,
                 deadband: _,
@@ -267,6 +267,13 @@ impl ConfigValidator {
                         field: "ewma_window_secs".to_string(),
                         value: ewma_window_secs.to_string(),
                         reason: "Must be > 0".to_string(),
+                    });
+                }
+                if *tick_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "tick_secs".to_string(),
+                        value: tick_secs.to_string(),
+                        reason: "Must be > 0 (the controller never runs otherwise)".to_string(),
                     });
                 }
                 if *sticky_min == 0 {

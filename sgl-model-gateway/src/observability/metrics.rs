@@ -557,6 +557,8 @@ pub mod metrics_labels {
     pub const POOL_RESIZE_GROW: &str = "grow";
     pub const POOL_RESIZE_SHRINK: &str = "shrink";
     pub const POOL_RESIZE_REASON_SHARE: &str = "share";
+    /// K forcibly clamped because the worker set shrank below K + sticky_min.
+    pub const POOL_RESIZE_REASON_CLAMP: &str = "clamp";
 
     // pool names
     pub const POOL_STICKY: &str = "sticky";
