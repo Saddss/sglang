@@ -493,6 +493,21 @@ impl TruncationAwarePolicy {
         }
     }
 
+    /// Pool label of a worker under the current membership snapshot
+    /// (used by the HTTP router for per-pool QPS/latency metrics).
+    pub fn pool_label_for(&self, worker: &dyn Worker) -> &'static str {
+        let state = self.model_state(normalize_model_key(worker.model_id()));
+        let is_trunc = {
+            let trunc_urls = state.trunc_urls.read().unwrap();
+            is_trunc_member(worker, &trunc_urls)
+        };
+        if is_trunc {
+            metrics_labels::POOL_TRUNCATION
+        } else {
+            metrics_labels::POOL_STICKY
+        }
+    }
+
     /// Min in-flight load selection within a subset of indices.
     fn select_min_load(workers: &[Arc<dyn Worker>], subset: &[usize]) -> Option<usize> {
         subset

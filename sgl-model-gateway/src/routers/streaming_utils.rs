@@ -28,6 +28,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Instant,
 };
 
 use bytes::Bytes;
@@ -35,6 +36,7 @@ use futures_util::Stream;
 use tracing::error;
 
 use crate::core::Worker;
+use crate::observability::metrics::Metrics;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Terminal {
@@ -138,6 +140,59 @@ impl<E> Drop for BreakerTrackedStream<E> {
             // is unhealthy.
             Terminal::Active => {}
         }
+    }
+}
+
+/// Stream adapter recording per-pool latency metrics for truncation_aware
+/// routing: TTFT (first byte) as soon as it happens, E2E on clean stream end.
+/// Errors and client disconnects record no E2E sample (a half-delivered
+/// response has no meaningful end-to-end latency).
+pub struct PoolLatencyStream<E> {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send + 'static>>,
+    start: Instant,
+    model: String,
+    pool: &'static str,
+    ttft_recorded: bool,
+    e2e_recorded: bool,
+}
+
+impl<E> PoolLatencyStream<E> {
+    pub fn new<S>(inner: S, start: Instant, model: String, pool: &'static str) -> Self
+    where
+        S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(inner),
+            start,
+            model,
+            pool,
+            ttft_recorded: false,
+            e2e_recorded: false,
+        }
+    }
+}
+
+impl<E> Stream for PoolLatencyStream<E> {
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let polled = self.inner.as_mut().poll_next(cx);
+        match &polled {
+            Poll::Ready(Some(Ok(_))) => {
+                if !self.ttft_recorded {
+                    self.ttft_recorded = true;
+                    Metrics::record_pool_ttft(&self.model, self.pool, self.start.elapsed());
+                }
+            }
+            Poll::Ready(None) => {
+                if !self.e2e_recorded {
+                    self.e2e_recorded = true;
+                    Metrics::record_pool_e2e(&self.model, self.pool, self.start.elapsed());
+                }
+            }
+            _ => {}
+        }
+        polled
     }
 }
 

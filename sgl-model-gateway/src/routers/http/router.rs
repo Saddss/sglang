@@ -38,10 +38,18 @@ use crate::{
         error::{self, extract_error_code_from_response},
         grpc::utils::{error_type_from_status, route_to_endpoint},
         header_utils,
-        streaming_utils::BreakerTrackedStream,
+        streaming_utils::{BreakerTrackedStream, PoolLatencyStream},
         RouterTrait,
     },
 };
+
+/// Context for attributing a request's QPS/TTFT/E2E to a truncation_aware
+/// pool (sticky|truncation). Resolved once at dispatch time.
+struct PoolMetricsCtx {
+    model: String,
+    pool: &'static str,
+    start: Instant,
+}
 
 /// Regular router that uses injected load balancing policies
 pub struct Router {
@@ -312,6 +320,23 @@ impl Router {
             .contains(&policy.name())
             .then(|| WorkerLoadGuard::new(worker.clone(), headers));
 
+        // Per-pool QPS/latency attribution (truncation_aware only): resolve the
+        // selected worker's pool once, count the dispatch, and hand the context
+        // to send_typed_request for TTFT/E2E recording.
+        let pool_metrics = policy
+            .as_any()
+            .downcast_ref::<crate::policies::TruncationAwarePolicy>()
+            .map(|trunc| {
+                let pool = trunc.pool_label_for(worker.as_ref());
+                let model = worker.model_id().to_string();
+                Metrics::record_pool_request(&model, pool, typed_req.is_truncated());
+                PoolMetricsCtx {
+                    model,
+                    pool,
+                    start: Instant::now(),
+                }
+            });
+
         // Note: Using borrowed reference avoids heap allocation
         events::RequestSentEvent { url: worker.url() }.emit();
         let mut headers_with_trace = headers.cloned().unwrap_or_default();
@@ -327,7 +352,15 @@ impl Router {
         );
 
         let response = self
-            .send_typed_request(headers, typed_req, route, &worker, is_stream, load_guard)
+            .send_typed_request(
+                headers,
+                typed_req,
+                route,
+                &worker,
+                is_stream,
+                load_guard,
+                pool_metrics,
+            )
             .await;
 
         events::RequestReceivedEvent {}.emit();
@@ -503,6 +536,7 @@ impl Router {
     }
 
     // Send typed request directly without conversion
+    #[allow(clippy::too_many_arguments)]
     async fn send_typed_request<T: serde::Serialize>(
         &self,
         headers: Option<&HeaderMap>,
@@ -511,6 +545,7 @@ impl Router {
         worker: &Arc<dyn Worker>,
         is_stream: bool,
         load_guard: Option<WorkerLoadGuard>,
+        pool_metrics: Option<PoolMetricsCtx>,
     ) -> Response {
         let worker_url = worker.url();
         let api_key = worker.api_key().clone();
@@ -616,6 +651,15 @@ impl Router {
 
             let response = match res.bytes().await {
                 Ok(body) => {
+                    // Non-streaming: the engine returns the full completion at
+                    // once, so first-byte and end-of-response coincide.
+                    if let Some(ctx) = &pool_metrics {
+                        if status.is_success() {
+                            let elapsed = ctx.start.elapsed();
+                            Metrics::record_pool_ttft(&ctx.model, ctx.pool, elapsed);
+                            Metrics::record_pool_e2e(&ctx.model, ctx.pool, elapsed);
+                        }
+                    }
                     let mut response = Response::new(Body::from(body));
                     *response.status_mut() = status;
                     *response.headers_mut() = response_headers;
@@ -654,7 +698,15 @@ impl Router {
             if !status.is_success() {
                 tracked.mark_errored();
             }
-            let body = Body::from_stream(tracked);
+            // Streaming latency attribution: TTFT on first chunk, E2E on clean
+            // stream end. Error responses keep their latency out of the pool
+            // histograms (pool_metrics dropped below).
+            let body = match pool_metrics.filter(|_| status.is_success()) {
+                Some(ctx) => Body::from_stream(PoolLatencyStream::new(
+                    tracked, ctx.start, ctx.model, ctx.pool,
+                )),
+                None => Body::from_stream(tracked),
+            };
 
             let mut response = Response::new(body);
             *response.status_mut() = status;

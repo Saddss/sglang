@@ -283,6 +283,21 @@ pub(crate) fn init_metrics() {
          sampled on the truncation_aware controller tick"
     );
     describe_counter!(
+        "smg_pool_requests_total",
+        "Requests dispatched by the truncation_aware policy, by model, target pool \
+         (sticky|truncation), and truncated flag; counted per attempt at dispatch"
+    );
+    describe_histogram!(
+        "smg_pool_ttft_duration_seconds",
+        "Time from router dispatch to first response byte by model and pool \
+         (truncation_aware only; for non-streaming responses this equals E2E)"
+    );
+    describe_histogram!(
+        "smg_pool_e2e_duration_seconds",
+        "Time from router dispatch to complete response delivery by model and pool \
+         (truncation_aware only; successful requests only, client disconnects excluded)"
+    );
+    describe_counter!(
         "smg_router_pool_evicted_tenants_total",
         "Workers evicted from the sticky cache-aware tree because they moved \
          into the truncation pool (each eviction rebalances that worker's sessions)"
@@ -1076,6 +1091,40 @@ impl Metrics {
             "pool" => pool
         )
         .set(avg);
+    }
+
+    /// Count a request dispatched to a pool (per attempt).
+    pub fn record_pool_request(model_id: &str, pool: &'static str, truncated: bool) {
+        let model = intern_string(model_id);
+        counter!(
+            "smg_pool_requests_total",
+            "model" => model,
+            "pool" => pool,
+            "truncated" => bool_to_static_str(truncated)
+        )
+        .increment(1);
+    }
+
+    /// Record time-to-first-byte for a pool-attributed request.
+    pub fn record_pool_ttft(model_id: &str, pool: &'static str, duration: Duration) {
+        let model = intern_string(model_id);
+        histogram!(
+            "smg_pool_ttft_duration_seconds",
+            "model" => model,
+            "pool" => pool
+        )
+        .record(duration.as_secs_f64());
+    }
+
+    /// Record end-to-end latency for a pool-attributed request.
+    pub fn record_pool_e2e(model_id: &str, pool: &'static str, duration: Duration) {
+        let model = intern_string(model_id);
+        histogram!(
+            "smg_pool_e2e_duration_seconds",
+            "model" => model,
+            "pool" => pool
+        )
+        .record(duration.as_secs_f64());
     }
 
     /// Record a worker evicted from the sticky tree after moving to the
