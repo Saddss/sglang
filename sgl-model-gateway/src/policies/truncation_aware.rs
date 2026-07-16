@@ -31,10 +31,14 @@
     Membership is authoritative per controller tick, not per request: the
     request path only records which workers it sees and routes within the
     current membership snapshot, while the tick recomputes the partition from
-    the recently-seen worker set (TTL-pruned to approximate registry removal).
-    A transient health flap therefore narrows the routable subset but cannot
-    reshuffle membership or evict sticky-tree tenants mid-flap; tree evictions
-    happen only on tick, after the flap either heals or outlives the TTL.
+    the known worker set. The known set is synced authoritatively by the
+    registry via `init_workers` (worker add/remove) and refreshed by the
+    request path; the TTL prune is a backstop that only runs in windows that
+    carried traffic — an idle window refreshes no stamps and must not
+    collapse the partition. A transient health flap therefore narrows the
+    routable subset but cannot reshuffle membership or evict sticky-tree
+    tenants mid-flap; tree evictions happen only on tick, after the flap
+    either heals or outlives the TTL.
 
     Moving a worker sticky→truncation evicts it from the cache-aware tree
     (its sessions rebalance and pay one re-prefill); truncation→sticky is
@@ -47,7 +51,7 @@
 */
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -133,8 +137,10 @@ struct ModelState {
     /// Counter snapshots from the previous tick (delta = this window's traffic).
     prev_total: AtomicU64,
     prev_truncated: AtomicU64,
-    /// EWMA of the truncated share, updated each tick.
-    ewma_share: Mutex<f64>,
+    /// EWMA of the truncated share, updated each tick. `None` until the
+    /// first window with traffic (warm start: the first observation is used
+    /// as-is instead of blending from zero).
+    ewma_share: Mutex<Option<f64>>,
     /// Current truncation pool size target.
     k: AtomicUsize,
     last_resize_at: Mutex<Option<Instant>>,
@@ -151,7 +157,7 @@ impl ModelState {
             truncated_requests: AtomicU64::new(0),
             prev_total: AtomicU64::new(0),
             prev_truncated: AtomicU64::new(0),
-            ewma_share: Mutex::new(0.0),
+            ewma_share: Mutex::new(None),
             k: AtomicUsize::new(0),
             last_resize_at: Mutex::new(None),
             known: DashMap::new(),
@@ -254,9 +260,16 @@ fn update_share_and_k(model: &str, state: &ModelState, config: &TruncationAwareC
             // alpha = tick/window: the EWMA time constant tracks ewma_window_secs.
             let alpha =
                 (config.tick_secs as f64 / config.ewma_window_secs.max(1) as f64).clamp(0.0, 1.0);
-            *ewma = alpha * window_share + (1.0 - alpha) * *ewma;
+            *ewma = Some(match *ewma {
+                // Warm start: the first traffic window is the best available
+                // estimate. Blending from an implicit 0 undersized the pool
+                // for several minutes after startup (observed live at high
+                // truncation share).
+                None => window_share,
+                Some(prev) => alpha * window_share + (1.0 - alpha) * prev,
+            });
         }
-        *ewma
+        ewma.unwrap_or(0.0)
     };
     Metrics::set_truncated_share(model, share);
 
@@ -289,23 +302,38 @@ fn update_share_and_k(model: &str, state: &ModelState, config: &TruncationAwareC
         return;
     }
 
+    // Cooldown damps membership churn (a grow step evicts a sticky worker's
+    // sessions). Exception: while the truncation pool is measurably
+    // overloaded (pressure bit), grow steps are allowed every tick so an
+    // undersized pool converges within ticks instead of cooldown periods.
+    let growing = new_k > current_k;
+    let mut pressure_bypass = false;
     {
         let mut last = state.last_resize_at.lock().unwrap();
-        if let Some(at) = *last {
-            if at.elapsed().as_secs() < config.cooldown_secs {
+        let in_cooldown = last
+            .map(|at| at.elapsed().as_secs() < config.cooldown_secs)
+            .unwrap_or(false);
+        if in_cooldown {
+            if !(growing && pool_pressured(state, config)) {
                 return;
             }
+            pressure_bypass = true;
         }
         *last = Some(Instant::now());
     }
 
     state.k.store(new_k, Ordering::Relaxed);
-    let direction = if new_k > current_k {
+    let direction = if growing {
         metrics_labels::POOL_RESIZE_GROW
     } else {
         metrics_labels::POOL_RESIZE_SHRINK
     };
-    Metrics::record_truncation_pool_resize(model, direction, metrics_labels::POOL_RESIZE_REASON_SHARE);
+    let reason = if pressure_bypass {
+        metrics_labels::POOL_RESIZE_REASON_PRESSURE
+    } else {
+        metrics_labels::POOL_RESIZE_REASON_SHARE
+    };
+    Metrics::record_truncation_pool_resize(model, direction, reason);
     info!(
         "truncation pool ({}) resized {} -> {} (share {:.4}, n {})",
         model, current_k, new_k, share, n
@@ -354,8 +382,9 @@ fn repartition(state: &ModelState, sticky: &CacheAwarePolicy, config: &Truncatio
     *current = new_set;
 }
 
-/// Publish per-pool sizes, per-worker inflight averages, and the pressure bit.
-fn publish_pool_gauges(model: &str, state: &ModelState, config: &TruncationAwareConfig) {
+/// Pool sizes and average per-worker in-flight load (sticky, truncation)
+/// under the current membership snapshot.
+fn pool_inflight_averages(state: &ModelState) -> (usize, f64, usize, f64) {
     let trunc_urls = state.trunc_urls.read().unwrap();
     let (mut s_count, mut s_load, mut t_count, mut t_load) = (0usize, 0usize, 0usize, 0usize);
     for entry in state.known.iter() {
@@ -368,10 +397,22 @@ fn publish_pool_gauges(model: &str, state: &ModelState, config: &TruncationAware
             s_load += worker.load();
         }
     }
-    Metrics::set_truncation_pool_sizes(model, s_count, t_count);
-
     let s_avg = if s_count > 0 { s_load as f64 / s_count as f64 } else { 0.0 };
     let t_avg = if t_count > 0 { t_load as f64 / t_count as f64 } else { 0.0 };
+    (s_count, s_avg, t_count, t_avg)
+}
+
+/// Truncation pool overload bit: per-worker inflight beyond
+/// `pressure_ratio` x the sticky pool's per-worker inflight.
+fn pool_pressured(state: &ModelState, config: &TruncationAwareConfig) -> bool {
+    let (s_count, s_avg, t_count, t_avg) = pool_inflight_averages(state);
+    s_count > 0 && t_count > 0 && t_avg > (config.pressure_ratio as f64) * s_avg
+}
+
+/// Publish per-pool sizes, per-worker inflight averages, and the pressure bit.
+fn publish_pool_gauges(model: &str, state: &ModelState, config: &TruncationAwareConfig) {
+    let (s_count, s_avg, t_count, t_avg) = pool_inflight_averages(state);
+    Metrics::set_truncation_pool_sizes(model, s_count, t_count);
     Metrics::set_pool_inflight_per_worker(model, metrics_labels::POOL_STICKY, s_avg);
     Metrics::set_pool_inflight_per_worker(model, metrics_labels::POOL_TRUNCATION, t_avg);
 
@@ -381,8 +422,19 @@ fn publish_pool_gauges(model: &str, state: &ModelState, config: &TruncationAware
 }
 
 fn tick_model(model: &str, state: &ModelState, sticky: &CacheAwarePolicy, config: &TruncationAwareConfig) {
-    let ttl = config.known_ttl();
-    state.known.retain(|_, e| e.last_seen.elapsed() < ttl);
+    // TTL-prune only when the window carried traffic: the request path
+    // touches every routable worker, so under traffic a stale stamp means
+    // the worker left the registry. An idle window refreshes nothing and
+    // must not collapse the partition (observed live: pools dropped to 0/0
+    // after an idle gap and truncated traffic then spilled into the sticky
+    // pool until the next tick). Registry changes also sync the known set
+    // directly via `init_workers`.
+    let had_traffic = state.total_requests.load(Ordering::Relaxed)
+        != state.prev_total.load(Ordering::Relaxed);
+    if had_traffic {
+        let ttl = config.known_ttl();
+        state.known.retain(|_, e| e.last_seen.elapsed() < ttl);
+    }
 
     update_share_and_k(model, state, config);
     repartition(state, sticky, config);
@@ -441,6 +493,34 @@ impl TruncationAwarePolicy {
         for entry in self.models.iter() {
             for url in entry.value().trunc_urls.read().unwrap().iter() {
                 self.sticky.remove_worker_by_url(url);
+            }
+        }
+
+        // Authoritative known-set sync: the registry calls this on worker
+        // add/remove with the model's full worker list, so the controller
+        // learns about registry changes directly instead of relying on
+        // request-path touches plus the TTL backstop. (A concurrent request
+        // may transiently re-insert a just-removed worker via touch_known;
+        // the TTL prune clears it on the next traffic-carrying tick.)
+        let mut by_model: HashMap<String, Vec<&Arc<dyn Worker>>> = HashMap::new();
+        for worker in workers {
+            by_model
+                .entry(normalize_model_key(worker.model_id()).to_string())
+                .or_default()
+                .push(worker);
+        }
+        for (model_key, group) in by_model {
+            let state = self.model_state(&model_key);
+            let urls: HashSet<&str> = group.iter().map(|w| w.url()).collect();
+            state.known.retain(|url, _| urls.contains(url.as_str()));
+            for worker in group {
+                state.known.insert(
+                    worker.url().to_string(),
+                    KnownWorker {
+                        worker: Arc::clone(worker),
+                        last_seen: Instant::now(),
+                    },
+                );
             }
         }
     }
@@ -617,7 +697,7 @@ impl LoadBalancingPolicy for TruncationAwarePolicy {
         true
     }
 
-    fn update_loads(&self, loads: &std::collections::HashMap<String, isize>) {
+    fn update_loads(&self, loads: &HashMap<String, isize>) {
         self.sticky.update_loads(loads);
     }
 
@@ -823,11 +903,123 @@ mod tests {
             ..test_config()
         };
         let (state, _workers) = seeded_state(8);
-        *state.ewma_share.lock().unwrap() = 0.5;
+        *state.ewma_share.lock().unwrap() = Some(0.5);
 
         // No new requests this window: share must not decay toward 0.
         update_share_and_k("m", &state, &cfg);
-        assert!((*state.ewma_share.lock().unwrap() - 0.5).abs() < 1e-9);
+        assert!((state.ewma_share.lock().unwrap().unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_controller_ewma_warm_start_on_first_window() {
+        let cfg = TruncationAwareConfig {
+            ewma_window_secs: 60,
+            tick_secs: 10, // alpha = 1/6: blending from 0 would give 0.1
+            cooldown_secs: 0,
+            ..test_config()
+        };
+        let (state, _workers) = seeded_state(8);
+
+        // First window with traffic: 60% truncated is adopted as-is.
+        state.total_requests.store(100, Ordering::Relaxed);
+        state.truncated_requests.store(60, Ordering::Relaxed);
+        update_share_and_k("m", &state, &cfg);
+        assert!((state.ewma_share.lock().unwrap().unwrap() - 0.6).abs() < 1e-9);
+
+        // Subsequent windows blend normally (0.6 → toward 0.0 by alpha=1/6).
+        state.total_requests.store(200, Ordering::Relaxed);
+        update_share_and_k("m", &state, &cfg);
+        let blended = state.ewma_share.lock().unwrap().unwrap();
+        assert!((blended - 0.5).abs() < 1e-9, "got {}", blended);
+    }
+
+    #[test]
+    fn test_pressured_growth_bypasses_cooldown() {
+        let cfg = TruncationAwareConfig {
+            ewma_window_secs: 30,
+            tick_secs: 30, // alpha = 1
+            cooldown_secs: 3600,
+            ..test_config()
+        };
+        let policy = TruncationAwarePolicy::with_config(cfg.clone());
+        let workers = make_workers(8);
+        policy.test_force_partition(&workers, 1);
+        let state = policy.test_state(&workers);
+        *state.last_resize_at.lock().unwrap() = Some(Instant::now());
+
+        // 50% truncated → K* = 4 > 1, but the pool is not pressured
+        // (no in-flight load anywhere): cooldown must hold K.
+        state.total_requests.store(100, Ordering::Relaxed);
+        state.truncated_requests.store(50, Ordering::Relaxed);
+        update_share_and_k("m", &state, &cfg);
+        assert_eq!(state.k.load(Ordering::Relaxed), 1);
+
+        // Overload the truncation member (sticky stays idle): the pressure
+        // bit must let the grow step through the cooldown.
+        let trunc_set = compute_trunc_set(&entries(&workers), 1);
+        for w in &workers {
+            if trunc_set.contains(w.url()) {
+                for _ in 0..5 {
+                    w.increment_load();
+                }
+            }
+        }
+        state.total_requests.store(200, Ordering::Relaxed);
+        state.truncated_requests.store(100, Ordering::Relaxed);
+        update_share_and_k("m", &state, &cfg);
+        assert_eq!(state.k.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_idle_tick_preserves_known_set_and_membership() {
+        let cfg = test_config();
+        let policy = TruncationAwarePolicy::with_config(cfg.clone());
+        let workers = make_workers(8);
+        policy.test_force_partition(&workers, 1);
+        let state = policy.test_state(&workers);
+        // Prior traffic established a share matching K=1 (round(8*0.125)),
+        // so the idle window must hold both share and K.
+        *state.ewma_share.lock().unwrap() = Some(0.125);
+        let membership_before = state.trunc_urls.read().unwrap().clone();
+        assert_eq!(membership_before.len(), 1);
+
+        // Age every stamp beyond the TTL (assumes host uptime > 2 minutes).
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(cfg.known_ttl().as_secs() + 30))
+            .expect("test host uptime must exceed the known TTL");
+        let urls: Vec<String> = state.known.iter().map(|e| e.key().clone()).collect();
+        for url in &urls {
+            if let Some(mut entry) = state.known.get_mut(url) {
+                entry.last_seen = stale;
+            }
+        }
+
+        // Idle window (no traffic): known set and membership must survive.
+        tick_model("m", &state, policy.sticky_policy(), &cfg);
+        assert_eq!(state.known.len(), 8);
+        assert_eq!(*state.trunc_urls.read().unwrap(), membership_before);
+
+        // Window with traffic: stale entries are now evidence of removal.
+        state.total_requests.store(10, Ordering::Relaxed);
+        tick_model("m", &state, policy.sticky_policy(), &cfg);
+        assert_eq!(state.known.len(), 0);
+    }
+
+    #[test]
+    fn test_init_workers_syncs_known_set() {
+        let policy = TruncationAwarePolicy::with_config(test_config());
+        let workers = make_workers(8);
+        policy.init_workers(&workers);
+        let state = policy.model_state(normalize_model_key(workers[0].model_id()));
+        assert_eq!(state.known.len(), 8);
+
+        // Registry shrinks to 5 workers: the known set follows immediately,
+        // without waiting for request-path touches or the TTL backstop.
+        policy.init_workers(&workers[..5]);
+        assert_eq!(state.known.len(), 5);
+        for w in &workers[..5] {
+            assert!(state.known.contains_key(w.url()));
+        }
     }
 
     #[test]

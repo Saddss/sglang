@@ -574,6 +574,9 @@ pub mod metrics_labels {
     pub const POOL_RESIZE_REASON_SHARE: &str = "share";
     /// K forcibly clamped because the worker set shrank below K + sticky_min.
     pub const POOL_RESIZE_REASON_CLAMP: &str = "clamp";
+    /// Grow step let through the cooldown because the truncation pool was
+    /// overloaded (per-worker inflight beyond pressure_ratio x sticky).
+    pub const POOL_RESIZE_REASON_PRESSURE: &str = "pressure";
 
     // pool names
     pub const POOL_STICKY: &str = "sticky";
